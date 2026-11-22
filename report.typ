@@ -91,8 +91,8 @@
     #v(8pt)
     #text(9.5pt, fill: rgb("#334155"))[
       *FOSSEE Internship Screening Task Submission* \
-      *Target Repository:* `https://github.com/Nidhikhare12/OsdagBridge.git` \
-      *Target Branch:* `dev` #h(10pt) | #h(10pt) *Reviewer / Collaborator:* `Nidhikhare12`
+      *Candidate:* Nizam (`nizamulhaq500`) #h(8pt) | #h(8pt) *Fork:* `https://github.com/nizamulhaq500/OsdagBridge` \
+      *Target Branch:* `dev` #h(8pt) | #h(8pt) *Invited Reviewer / Collaborator:* `Nidhikhare12`
     ]
   ]
 ]

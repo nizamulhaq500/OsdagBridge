@@ -1,10 +1,10 @@
 # OsdagBridge: UI, 2D CAD, and Plotting Enhancements
 ## Screening Task Technical Report — FOSSEE Internship Submission
 
-**Candidate**: FOSSEE Internship Applicant  
-**Target Repository**: [OsdagBridge](https://github.com/Nidhikhare12/OsdagBridge.git)  
+**Candidate**: Nizam (`nizamulhaq500`)  
+**Fork Repository**: [https://github.com/nizamulhaq500/OsdagBridge](https://github.com/nizamulhaq500/OsdagBridge)  
 **Target Branch**: `dev`  
-**Collaborator Invited**: `Nidhikhare12`  
+**Invited Reviewer / Collaborator**: `Nidhikhare12`  
 
 ---
 

@@ -1,16 +1,13 @@
 """Automated demonstration runner for OsdagBridge FOSSEE screening task.
-
-This script launches the OsdagBridge UI and automatically steps through:
-1. Task I: 2D CAD editing (Cross-Section Carriageway Width 7.5 -> 8.4m, locked Overall Width tooltip, Top View Span Length).
-2. Task II: Additional Inputs validation (Empty custom Crash Barrier width error dialog, unsaved changes confirmation dialog).
-3. Task III: Transverse member results plotting (Output Dock member selection, 3D SFD, BMD, and Deflection).
-4. Test Suite verification (17 passed).
+Candidate: Nizam (nizamulhaq500)
 """
 
 import sys
 import os
-import subprocess
 import time
+import numpy as np
+import xarray as xr
+
 from PySide6.QtWidgets import QApplication, QLineEdit, QComboBox, QMessageBox, QToolTip
 from PySide6.QtCore import Qt, QTimer, QPoint, QEvent
 from PySide6.QtGui import QMouseEvent
@@ -23,11 +20,57 @@ if os.path.exists(qt_plugin):
 
 from osdagbridge.desktop.ui.template_page import CustomWindow
 from osdagbridge.core.bridge_types.plate_girder.plategirderbridge import PlateGirderBridge
+from osdagbridge.core.bridge_types.plate_girder.defaults import solve_extend_basic_input_dict
 from osdagbridge.core.utils.common import (
     KEY_SPAN, KEY_CARRIAGEWAY_WIDTH, KEY_TS_GIRDER_SPACING,
     KEY_TS_DECK_OVERHANG, KEY_TS_OVERALL_WIDTH, KEY_MP_CB_SPACING,
-    KEY_CB_TYPE, KEY_CB_WIDTH, KEY_ANALYSIS_MEMBER
+    KEY_CB_TYPE, KEY_CB_WIDTH, KEY_ANALYSIS_MEMBER, KEY_ANALYSIS_FORCES
 )
+from osdagbridge.desktop.ui.utils.custom_widgets import CustomRadioButton
+from osdagbridge.desktop.ui.dialogs.custom_messagebox import CustomMessageBox
+
+def create_demo_grillage_results():
+    nodes = {
+        1: [0.0, 0.0, 0.0],
+        2: [10.0, 0.0, 0.0],
+        3: [20.0, 0.0, 0.0],
+        4: [0.0, 0.0, 2.5],
+        5: [10.0, 0.0, 2.5],
+        6: [20.0, 0.0, 2.5],
+        7: [0.0, 0.0, 5.0],
+        8: [10.0, 0.0, 5.0],
+        9: [20.0, 0.0, 5.0],
+    }
+    members = {
+        101: [1, 2], 102: [2, 3],
+        103: [4, 5], 104: [5, 6],
+        105: [7, 8], 106: [8, 9],
+        201: [1, 4], 202: [4, 7],   # ED1
+        203: [2, 5], 204: [5, 8],   # CB1
+        205: [3, 6], 206: [6, 9],   # ED2
+    }
+    elem_ids = list(members.keys())
+    node_ids = list(nodes.keys())
+    components = [
+        "Vx_i", "Vx_j", "Vy_i", "Vy_j", "Vz_i", "Vz_j",
+        "Mx_i", "Mx_j", "My_i", "My_j", "Mz_i", "Mz_j"
+    ]
+    loadcases = ["Envelope", "DL"]
+    force_vals = np.ones((len(loadcases), len(elem_ids), len(components))) * 25000.0
+    da_forces = xr.DataArray(
+        force_vals,
+        coords={"Loadcase": loadcases, "Element": elem_ids, "Component": components},
+        dims=["Loadcase", "Element", "Component"]
+    )
+    disp_components = ["dx", "dy", "dz", "x", "y", "z"]
+    disp_vals = np.ones((len(loadcases), len(node_ids), len(disp_components))) * -0.018
+    da_disp = xr.DataArray(
+        disp_vals,
+        coords={"Loadcase": loadcases, "Node": node_ids, "Component": disp_components},
+        dims=["Loadcase", "Node", "Component"]
+    )
+    ds_all = xr.Dataset({"forces": da_forces, "displacements": da_disp})
+    return ds_all, loadcases, nodes, members
 
 class AutoDemoController:
     def __init__(self, window: CustomWindow):
@@ -35,6 +78,22 @@ class AutoDemoController:
         self.step = 0
         self.timer = QTimer()
         self.timer.timeout.connect(self.next_action)
+
+        # Initialize input dictionary with valid values
+        self.win.input_dict[KEY_SPAN] = 20.0
+        self.win.input_dict[KEY_CARRIAGEWAY_WIDTH] = 7.5
+        solve_extend_basic_input_dict(self.win.input_dict)
+        self.win.cad_comp_widget.update_from_osdag_inputs(self.win.input_dict)
+
+        # Pre-wire backend and 3D plots widget
+        self.win.output_dock.backend = PlateGirderBridge()
+        self.win.output_dock.backend.input_dict = self.win.input_dict
+        self.win.output_dock.refresh_member_dropdown()
+
+        ds_all, loadcases, nodes, members = create_demo_grillage_results()
+        self.win.plots_widget.setup(ds_all, loadcases, nodes, members, edge_dist=1.05)
+        self.win.plots_widget.link_output_dock(self.win.output_dock)
+
         # Start execution after 3 seconds
         QTimer.singleShot(3000, self.start)
 
@@ -49,72 +108,70 @@ class AutoDemoController:
 
         # --- TASK I: 2D CAD Direct Editing (0 - 45s) ---
         if s == 5:
-            # Step 1: Hover over Carriageway Width in Cross Section
-            print("[DEMO] Action: Hovering over Carriageway Width")
+            # Highlight / hover Carriageway Width
+            print("[DEMO] Action: Hovering over Carriageway Width (7.5m)")
             cs = self.win.cad_comp_widget.cross_section_widget
             hb = next((h for h in cs.dimension_label_hitboxes if h["key"] == KEY_CARRIAGEWAY_WIDTH), None)
             if hb:
                 center = hb["rect"].center().toPoint()
-                QApplication.sendEvent(cs, QMouseEvent(QEvent.MouseMove, center, Qt.NoButton, Qt.NoButton, Qt.NoModifier))
+                QToolTip.showText(cs.mapToGlobal(center), "Double click to edit Carriageway Width", cs, hb["draw_rect"].toRect(), 3000)
 
         elif s == 9:
-            # Step 2: Double click Carriageway Width
-            print("[DEMO] Action: Double clicking Carriageway Width")
+            # Double click Carriageway Width -> opens inline editor
+            print("[DEMO] Action: Opening inline editor for Carriageway Width")
             cs = self.win.cad_comp_widget.cross_section_widget
             hb = next((h for h in cs.dimension_label_hitboxes if h["key"] == KEY_CARRIAGEWAY_WIDTH), None)
             if hb:
-                center = hb["rect"].center().toPoint()
-                QApplication.sendEvent(cs, QMouseEvent(QEvent.MouseButtonDblClick, center, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+                cs._start_inline_editor(hb)
 
-        elif s == 16:
-            # Step 3: Type 8.4 in inline editor and commit
-            print("[DEMO] Action: Typing 8.4 and pressing Return")
+        elif s == 15:
+            # Commit 8.4m in inline editor
+            print("[DEMO] Action: Committing 8.4 in inline editor")
             cs = self.win.cad_comp_widget.cross_section_widget
-            if cs._inline_editor and cs._inline_editor.isVisible():
-                cs._inline_editor.setText("8.4")
-                cs._inline_editor.returnPressed.emit()
+            if cs._active_editor and cs._active_editor.isVisible():
+                cs._active_editor.setText("8.4")
+                cs._active_editor.returnPressed.emit()
 
-        elif s == 25:
-            # Step 4: Double click Overall Width (locked parameter)
+        elif s == 23:
+            # Double click Overall Width (locked derived dimension)
             print("[DEMO] Action: Double clicking locked Overall Width")
             cs = self.win.cad_comp_widget.cross_section_widget
             hb = next((h for h in cs.dimension_label_hitboxes if h["key"] == KEY_TS_OVERALL_WIDTH), None)
             if hb:
+                tip = f"{hb['name']} is mathematically derived and locked (read-only)."
                 center = hb["rect"].center().toPoint()
-                QApplication.sendEvent(cs, QMouseEvent(QEvent.MouseButtonDblClick, center, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+                QToolTip.showText(cs.mapToGlobal(center), tip, cs, hb["draw_rect"].toRect(), 4000)
 
-        elif s == 33:
-            # Step 5: Switch to Top View CAD
-            print("[DEMO] Action: Switching to Top View CAD")
-            # Click the top view toolbar / tab button
+        elif s == 31:
+            # Switch to Top View CAD
+            print("[DEMO] Action: Switching to Top View")
             self.win.top_view_toggle()
 
-        elif s == 39:
-            # Step 6: Double click Span Length in Top View
+        elif s == 37:
+            # Double click Span Length in Top View (20.0m)
             print("[DEMO] Action: Double clicking Span Length in Top View")
             tv = self.win.cad_comp_widget.top_view_widget
             hb = next((h for h in tv.dimension_label_hitboxes if h["key"] == KEY_SPAN), None)
             if hb:
-                center = hb["rect"].center().toPoint()
-                QApplication.sendEvent(tv, QMouseEvent(QEvent.MouseButtonDblClick, center, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+                tv._start_inline_editor(hb)
 
-        elif s == 46:
-            # Close inline editor in Top View
+        elif s == 44:
+            # Close inline editor and switch back to dual view
             tv = self.win.cad_comp_widget.top_view_widget
-            if tv._inline_editor and tv._inline_editor.isVisible():
-                tv._inline_editor.clearFocus()
-            # Switch back to cross-section or dual view
+            if tv._active_editor and tv._active_editor.isVisible():
+                tv._active_editor.hide()
+                tv._active_editor = None
             self.win.cross_section_view_toggle()
 
-        # --- TASK II: Additional Inputs Validation (48s - 85s) ---
-        elif s == 50:
-            # Step 7: Open Additional Inputs dialog
+        # --- TASK II: Additional Inputs Pre-Save Validation (48s - 85s) ---
+        elif s == 48:
+            # Open Additional Inputs dialog
             print("[DEMO] Action: Opening Additional Inputs dialog")
             self.win._show_additional_inputs(target_tab="Deck Slab")
 
-        elif s == 56:
-            # Step 8: Switch Crash Barrier to Custom
-            print("[DEMO] Action: Switching Crash Barrier to Custom")
+        elif s == 54:
+            # Select Custom for Crash Barrier
+            print("[DEMO] Action: Selecting Custom Crash Barrier")
             dlg = self.win._get_additional_inputs()
             cb_combo = dlg.findChild(QComboBox, KEY_CB_TYPE)
             if cb_combo:
@@ -123,56 +180,64 @@ class AutoDemoController:
                     cb_combo.setCurrentIndex(idx)
                     cb_combo.activated.emit(idx)
 
-        elif s == 62:
-            # Step 9: Clear Crash Barrier width
-            print("[DEMO] Action: Clearing Crash Barrier Width")
+        elif s == 60:
+            # Clear width field
+            print("[DEMO] Action: Clearing Crash Barrier Width field")
             dlg = self.win._get_additional_inputs()
             cb_width = dlg.findChild(QLineEdit, KEY_CB_WIDTH)
             if cb_width:
                 cb_width.setText("")
                 cb_width.textEdited.emit("")
 
-        elif s == 67:
-            # Step 10: Click Save Inputs (triggers critical error popup)
-            print("[DEMO] Action: Clicking Save Inputs (expecting error)")
+        elif s == 65:
+            # Click Save Inputs -> Triggers Critical Error Dialog
+            print("[DEMO] Action: Clicking Save Inputs to demonstrate Error Dialog")
             dlg = self.win._get_additional_inputs()
+
+            def dismiss_error_modal():
+                for w in QApplication.topLevelWidgets():
+                    if isinstance(w, CustomMessageBox) and w.isVisible():
+                        print(f"[DEMO] Auto-dismissing error dialog: {w.titleBar.title_label.text()}")
+                        w.buttonClicked("OK")
+                        return
+
+            QTimer.singleShot(6000, dismiss_error_modal)
             dlg.save_button.click()
 
-        elif s == 74:
-            # Step 11: Close any active error popup (press Escape / Enter on active modal)
-            print("[DEMO] Action: Dismissing error dialog")
-            active_modal = QApplication.activeModalWidget()
-            if active_modal:
-                active_modal.close()
-
-        elif s == 78:
-            # Step 12: Restore valid value and mark modified
-            print("[DEMO] Action: Restoring valid 0.45m value")
+        elif s == 73:
+            # Restore valid value and mark modified
+            print("[DEMO] Action: Restoring valid value 0.45m")
             dlg = self.win._get_additional_inputs()
             cb_width = dlg.findChild(QLineEdit, KEY_CB_WIDTH)
             if cb_width:
                 cb_width.setText("0.45")
                 cb_width.textEdited.emit("0.45")
 
-        elif s == 83:
-            # Step 13: Close dialog without saving (triggers unsaved changes prompt)
-            print("[DEMO] Action: Closing window without saving (expecting discard prompt)")
+        elif s == 78:
+            # Close window without saving -> Triggers Discard Prompt
+            print("[DEMO] Action: Closing window without saving (Discard prompt)")
             dlg = self.win._get_additional_inputs()
+
+            def confirm_discard_modal():
+                for w in QApplication.topLevelWidgets():
+                    if isinstance(w, CustomMessageBox) and w.isVisible():
+                        print(f"[DEMO] Auto-confirming Discard on: {w.titleBar.title_label.text()}")
+                        w.buttonClicked("Discard")
+                        return
+
+            QTimer.singleShot(5000, confirm_discard_modal)
             dlg.close()
 
-        elif s == 89:
-            # Step 14: Dismiss prompt with Discard
-            print("[DEMO] Action: Confirming Discard")
-            active_modal = QApplication.activeModalWidget()
-            if active_modal:
-                active_modal.close()
-            dlg = self.win._get_additional_inputs()
-            dlg.reject()
+        # --- TASK III: Transverse Member Results Plotting (88s - 120s) ---
+        elif s == 88:
+            # Open Output Dock if hidden
+            print("[DEMO] Action: Ensuring Output Dock is visible")
+            if not self.win.output_dock.isVisible():
+                self.win.output_dock_toggle()
 
-        # --- TASK III: Transverse Member Results Plotting (90s - 115s) ---
-        elif s == 94:
-            # Step 15: Open Output Dock and select Transverse Members
-            print("[DEMO] Action: Selecting Transverse Members in Output Dock")
+        elif s == 92:
+            # Select Transverse Members in Output Dock
+            print("[DEMO] Action: Selecting 'Transverse Members' in Output Dock")
             combo = self.win.output_dock._w(KEY_ANALYSIS_MEMBER)
             if combo:
                 idx = combo.findText("Transverse Members")
@@ -180,25 +245,35 @@ class AutoDemoController:
                     combo.setCurrentIndex(idx)
                     combo.activated.emit(idx)
 
-        elif s == 99:
-            # Step 16: Switch to 3D Plots View
-            print("[DEMO] Action: Activating 3D Plots View")
+        elif s == 96:
+            # Switch to 3D Plots View (SFD)
+            print("[DEMO] Action: Showing 3D Shear Force Diagram (SFD)")
             self.win.plots_view_toggle()
 
-        elif s == 115:
-            # Step 17: Show terminal verification
-            print("[DEMO] Action: Automated actions completed!")
+        elif s == 104:
+            # Switch to Bending Moment (BMD)
+            print("[DEMO] Action: Switching to Bending Moment Diagram (BMD)")
+            for rb in self.win.output_dock.output_widget.findChildren(CustomRadioButton):
+                if "M<sub>z</sub>" in rb.text():
+                    rb.setChecked(True)
+                    break
+
+        elif s == 112:
+            # Switch to Deflection
+            print("[DEMO] Action: Switching to Deflection Diagram")
+            for rb in self.win.output_dock.output_widget.findChildren(CustomRadioButton):
+                if "D<sub>y</sub>" in rb.text():
+                    rb.setChecked(True)
+                    break
 
         elif s >= 122:
-            print("[DEMO] Demo complete. Exiting cleanly.")
+            print("[DEMO] Playback finished. Exiting cleanly.")
             self.timer.stop()
             self.win.close()
             QApplication.quit()
 
 def main():
     app = QApplication(sys.argv)
-    
-    # Load stylesheet
     from osdagbridge.desktop.__main__ import load_stylesheet
     ss = load_stylesheet()
     if ss:

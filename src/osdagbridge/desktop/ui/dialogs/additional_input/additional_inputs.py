@@ -6,8 +6,8 @@ from copy import deepcopy
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QTabBar, QLabel, QLineEdit,
-    QComboBox, QPushButton, QCheckBox, QSizePolicy,
-    QDialog, QSizePolicy, QSizeGrip,
+    QComboBox, QPushButton, QCheckBox, QRadioButton, QSizePolicy,
+    QDialog, QSizeGrip,
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QEvent
 from PySide6.QtGui import QDoubleValidator
@@ -57,6 +57,9 @@ class AdditionalInputs(QDialog):
  
         # Store all Compute functions to be called at Design
         self._compute_functions = []
+
+        # Track unsaved user modifications
+        self.is_modified = False
 
         self.setObjectName("AdditionalInputs")
         self.setMinimumSize(900, 520)
@@ -177,6 +180,9 @@ class AdditionalInputs(QDialog):
         # Normalize existing numeric text to 2 decimal places for consistent display
         self._normalize_numeric_texts(2)
 
+        # Wire change tracking for unsaved changes warning
+        self._setup_modification_tracker()
+
         # self._print_widget_tree()
 
     # Print Additional Inputs Widget Tree--------------------------------------------
@@ -245,6 +251,8 @@ class AdditionalInputs(QDialog):
             self.interacted_first = False
             from osdagbridge.core.bridge_types.plate_girder.ui_fields_additional_input import END_CONNECTORS
             UIBuilder.wire_end_connectors(END_CONNECTORS, ai=self)
+
+        self.is_modified = False
 
     def set_defaults(self) -> None:  # lifecycle: populates all widgets from working_input_dict; called at init time only
         """
@@ -506,12 +514,172 @@ class AdditionalInputs(QDialog):
 
     # ── Dialog Persistence ───────────────────────────────────────────────────────
 
+    def _mark_modified(self, *args):
+        self.is_modified = True
+
+    def _setup_modification_tracker(self):
+        """Wire all user interaction signals across input controls to track unsaved modifications."""
+        for le in self.findChildren(QLineEdit):
+            try:
+                le.textEdited.connect(self._mark_modified)
+            except Exception:
+                pass
+        for cb in self.findChildren(QComboBox):
+            try:
+                cb.activated.connect(self._mark_modified)
+            except Exception:
+                pass
+        for chk in self.findChildren(QCheckBox):
+            try:
+                chk.clicked.connect(self._mark_modified)
+            except Exception:
+                pass
+        for rb in self.findChildren(QRadioButton):
+            try:
+                rb.clicked.connect(self._mark_modified)
+            except Exception:
+                pass
+
+    def _validate_custom_fields(self) -> str | None:
+        """
+        Pre-Save Validation (Empty Custom Fields):
+        Iterate through all active tabs in the Additional Inputs dialog.
+        If any parameter has its radio button/dropdown set to 'Custom' but the
+        corresponding line-edit/input field is empty, return an error message
+        explicitly naming the missing field:
+            "Error: The custom value for '[Parameter Name]' cannot be empty."
+        Otherwise return None.
+        """
+        import re
+
+        def clean_label(lbl_widget_or_text) -> str:
+            raw = lbl_widget_or_text.text() if hasattr(lbl_widget_or_text, "text") else str(lbl_widget_or_text)
+            clean = re.sub(r'<[^>]+>', '', raw)
+            return clean.strip().rstrip(':').rstrip('*').strip()
+
+        # Iterate active tabs
+        for tab_idx in range(self.tabs.count()):
+            if not self.tabs.isTabEnabled(tab_idx):
+                continue
+            tab_widget = self.tabs.widget(tab_idx)
+            if not tab_widget:
+                continue
+
+            # 1. Check all QComboBoxes inside this tab
+            for combo in tab_widget.findChildren(QComboBox):
+                if combo.isHidden():
+                    continue
+                if combo.currentText().strip() == "Custom":
+                    combo_name = combo.objectName()
+                    # A. Mode line field: '<key>.mode' -> value widget is '<key>.value'
+                    if combo_name.endswith(".mode"):
+                        base_key = combo_name[:-5]
+                        val_input = self.findChild(QLineEdit, base_key + ".value")
+                        if val_input and not val_input.isHidden() and not val_input.text().strip():
+                            lbl = self.findChild(QLabel, base_key + "_label") or tab_widget.findChild(QLabel, base_key + "_label")
+                            name = clean_label(lbl) if lbl else base_key
+                            return f"Error: The custom value for '{name}' cannot be empty."
+
+                    # B. Crash Barrier Type custom fields
+                    elif combo_name == KEY_CB_TYPE:
+                        cb_fields = [KEY_CB_WIDTH, KEY_CB_HEIGHT, KEY_CB_LOAD]
+                        for f_key in cb_fields:
+                            val_input = self.findChild(QLineEdit, f_key)
+                            if val_input and not val_input.isHidden() and not val_input.text().strip():
+                                lbl = self.findChild(QLabel, f_key + "_label")
+                                name = clean_label(lbl) if lbl else f_key
+                                return f"Error: The custom value for '{name}' cannot be empty."
+
+                    # C. Railing Load Mode custom field
+                    elif combo_name == KEY_RL_LOAD_MODE:
+                        val_input = self.findChild(QLineEdit, KEY_RL_LOAD_VALUE)
+                        if val_input and not val_input.isHidden() and not val_input.text().strip():
+                            lbl = self.findChild(QLabel, KEY_RL_LOAD_VALUE + "_label") or self.findChild(QLabel, KEY_RL_LOAD_MODE + "_label")
+                            name = clean_label(lbl) if lbl else "Railing Load"
+                            return f"Error: The custom value for '{name}' cannot be empty."
+
+                    # D. Median Type custom fields
+                    elif combo_name == KEY_MD_TYPE:
+                        md_fields = [KEY_MD_WIDTH, KEY_MD_HEIGHT]
+                        for f_key in md_fields:
+                            val_input = self.findChild(QLineEdit, f_key)
+                            if val_input and not val_input.isHidden() and not val_input.text().strip():
+                                lbl = self.findChild(QLabel, f_key + "_label")
+                                name = clean_label(lbl) if lbl else f_key
+                                return f"Error: The custom value for '{name}' cannot be empty."
+
+                    # E. Generic mode/custom combo with associated input
+                    else:
+                        for candidate_id in [combo_name + ".value", combo_name + "_value", combo_name + "_custom"]:
+                            val_input = self.findChild(QLineEdit, candidate_id)
+                            if val_input and not val_input.isHidden() and not val_input.text().strip():
+                                lbl = self.findChild(QLabel, combo_name + "_label")
+                                name = clean_label(lbl) if lbl else combo_name
+                                return f"Error: The custom value for '{name}' cannot be empty."
+
+            # 2. Check all QRadioButtons inside this tab
+            for rb in tab_widget.findChildren(QRadioButton):
+                if rb.isHidden() or not rb.isChecked():
+                    continue
+                if rb.text().strip() == "Custom":
+                    parent_w = rb.parentWidget()
+                    if parent_w:
+                        for le in parent_w.findChildren(QLineEdit):
+                            if not le.isHidden() and not le.text().strip():
+                                lbl = parent_w.findChild(QLabel)
+                                name = clean_label(lbl) if lbl else "Custom Field"
+                                return f"Error: The custom value for '{name}' cannot be empty."
+
+            # 3. Check AdaptiveWidgets inside this tab
+            for aw in tab_widget.findChildren(AdaptiveWidget):
+                if aw.isHidden():
+                    continue
+                controller_id = getattr(aw, "_controller_id", "")
+                mode = str(self.working_input_dict.get(controller_id) or "")
+                if mode == "Custom":
+                    active_w = aw.currentWidget()
+                    if isinstance(active_w, QLineEdit) and not active_w.isHidden() and not active_w.text().strip():
+                        field_id = getattr(aw, "_field_id", "")
+                        lbl = self.findChild(QLabel, field_id + "_label")
+                        name = clean_label(lbl) if lbl else field_id
+                        return f"Error: The custom value for '{name}' cannot be empty."
+
+        return None
+
+    def closeEvent(self, event):
+        """Warn user if attempting to close with unsaved modifications."""
+        if getattr(self, "is_modified", False):
+            res = CustomMessageBox(
+                title="Warning",
+                text="You have unsaved changes. Closing this window will discard them. Do you want to proceed?",
+                buttons=["Discard", "Cancel"],
+                dialogType=MessageBoxType.Warning,
+            ).exec()
+            if res == "Discard":
+                self.is_modified = False
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            event.accept()
+
+    def reject(self):
+        """Route dialog rejection (e.g. Escape key) through closeEvent."""
+        self.close()
+
     def _save_inputs(self):  # on_change: validates all tabs then commits working_input_dict and emits CAD update signal
+        # Pre-Save Validation (Empty Custom Fields)
+        custom_err = self._validate_custom_fields()
+        if custom_err:
+            CustomMessageBox(
+                title="Error",
+                text=custom_err,
+                buttons=["OK"],
+                dialogType=MessageBoxType.Critical,
+            ).exec()
+            return
 
         # Flush the currently-displayed stiffener member's widgets before committing.
-        # _save_stiffener_member_data otherwise only runs when switching *away* from a
-        # member (via _on_stiffener_member_load), so the last-viewed girder (e.g. G4)
-        # would never be persisted. This gives it the same save the other girders get.
         combo = self.findChild(QComboBox, KEY_MP_STIFFENER_SELECT_MEMBER_ID)
         if combo and combo.currentText().strip():
             self._save_stiffener_member_data(combo.currentText().strip())
@@ -521,7 +689,10 @@ class AdditionalInputs(QDialog):
         cad = self.findChild(CrossSectionCADWidget, KEY_TS_CAD_PREVIEW)
         if cad:
             self.update_template_page_2d_cad.emit(cad.params)
-        
+
+        # Mark changes as saved
+        self.is_modified = False
+
         CustomMessageBox(
             title="Saved",
             text="Inputs saved successfully.",
@@ -564,6 +735,7 @@ class AdditionalInputs(QDialog):
             self._update_input_dict(key, widget)
             return
 
+        self.is_modified = True
         current_text = widget.text().strip()
         self._update_input_dict(key, current_text)
 
@@ -584,6 +756,7 @@ class AdditionalInputs(QDialog):
         self._update_additional_input_cad()
 
     def _on_field_editing(self, current_text: str, key: str):  # on_change: soft validation while typing — updates dict/CAD only when valid, no popups
+        self.is_modified = True
         if not current_text.strip():
             self._update_input_dict(key, "")
             self._update_additional_input_cad()

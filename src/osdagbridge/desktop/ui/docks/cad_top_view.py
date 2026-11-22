@@ -5,8 +5,8 @@ Author: Arushi
 """
 from osdagbridge.core.utils.common import *
 import math
-from PySide6.QtWidgets import QWidget, QPushButton, QScrollArea
-from PySide6.QtCore import Qt, QRectF, QPointF, QTimer, QSize
+from PySide6.QtWidgets import QWidget, QPushButton, QScrollArea, QLineEdit, QToolTip
+from PySide6.QtCore import Qt, QRectF, QPointF, QTimer, QSize, Signal
 from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush, QPolygonF, QIcon
 from .cad_cross_section import CrossSectionCADWidget
 
@@ -27,6 +27,7 @@ LEADER_TEXT_OFFSET = 25    # leader label distance
 
 class TopViewCADWidget(QWidget):
     """Widget for drawing bridge top view"""
+    parameter_edited = Signal(str, float)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -34,6 +35,8 @@ class TopViewCADWidget(QWidget):
         self.show_span_values = False
         self.show_carriageway_values = False
         self.setMouseTracking(True)  # enable mouse tracking for hover
+        self.dimension_label_hitboxes = []
+        self._active_editor = None
         
         # top view hover tracking 
         self.top_view_hover_zones = []  # list of (QRectF, element_type)
@@ -462,9 +465,111 @@ class TopViewCADWidget(QWidget):
         self.zoom_reset() # Auto-fit height on parameter change
         self.update()
     
-    def mouseMoveEvent(self, event):
-        """Handle mouse hover for top view"""
+    def register_dimension_hitbox(self, rect, key, name, unit, value, editable=True):
+        """Register a dimension label bounding rectangle for double-click interaction."""
+        if rect is not None and not rect.isEmpty():
+            expanded = rect.adjusted(-4, -4, 4, 4)
+            self.dimension_label_hitboxes.append({
+                "rect": expanded,
+                "draw_rect": rect,
+                "key": key,
+                "name": name,
+                "unit": unit,
+                "value": float(value),
+                "editable": editable,
+            })
+
+    def mouseDoubleClickEvent(self, event):
+        """Handle double-clicking on dimension labels for inline parameter editing."""
         pos = event.position() if hasattr(event, 'position') else event.pos()
+        for hitbox in self.dimension_label_hitboxes:
+            if hitbox["rect"].contains(pos):
+                if hitbox["editable"]:
+                    self._start_inline_editor(hitbox)
+                else:
+                    tip = f"{hitbox['name']} is mathematically derived and locked (read-only)."
+                    global_pos = event.globalPosition().toPoint() if hasattr(event, 'globalPosition') else event.globalPos()
+                    QToolTip.showText(global_pos, tip, self, hitbox["draw_rect"].toRect(), 3000)
+                return
+        super().mouseDoubleClickEvent(event)
+
+    def _start_inline_editor(self, hitbox):
+        """Create a floating QLineEdit over the double-clicked dimension label."""
+        if self._active_editor is not None:
+            self._active_editor.hide()
+            self._active_editor.deleteLater()
+            self._active_editor = None
+
+        editor = QLineEdit(self)
+        editor.setObjectName("cad_inline_editor")
+        geom = hitbox["draw_rect"].adjusted(-6, -2, 6, 2).toRect()
+        if geom.width() < 75:
+            geom.setWidth(75)
+        editor.setGeometry(geom)
+
+        val = hitbox["value"]
+        if hitbox["unit"] == "mm":
+            editor.setText(f"{val:.0f}")
+        else:
+            editor.setText(f"{val:.2f}".rstrip('0').rstrip('.') if f"{val:.2f}".endswith('.00') else f"{val:.2f}")
+
+        editor.setStyleSheet("""
+            QLineEdit {
+                background-color: #FFFFFF;
+                color: #111111;
+                border: 2px solid #90AF13;
+                border-radius: 3px;
+                padding: 1px 3px;
+                font-family: Arial;
+                font-size: 11px;
+                font-weight: bold;
+            }
+        """)
+        editor.selectAll()
+        editor.show()
+        editor.setFocus()
+        self._active_editor = editor
+
+        finished = False
+
+        def commit_and_close(save=True):
+            nonlocal finished
+            if finished:
+                return
+            finished = True
+            text = editor.text().strip()
+            editor.hide()
+            editor.deleteLater()
+            self._active_editor = None
+            if save and text:
+                try:
+                    new_val = float(text)
+                    if new_val > 0 and abs(new_val - hitbox["value"]) > 1e-4:
+                        self.parameter_edited.emit(hitbox["key"], new_val)
+                except ValueError:
+                    pass
+
+        editor.returnPressed.connect(lambda: commit_and_close(True))
+        editor.editingFinished.connect(lambda: commit_and_close(True))
+
+        orig_keyPressEvent = editor.keyPressEvent
+        def keyPressEvent(e):
+            if e.key() == Qt.Key_Escape:
+                commit_and_close(False)
+            else:
+                orig_keyPressEvent(e)
+        editor.keyPressEvent = keyPressEvent
+
+    def mouseMoveEvent(self, event):
+        """Handle mouse hover for top view and dimension hitboxes"""
+        pos = event.position() if hasattr(event, 'position') else event.pos()
+
+        # Update cursor when hovering over dimension label hitboxes
+        on_dim_hitbox = any(hb["rect"].contains(pos) for hb in self.dimension_label_hitboxes)
+        if on_dim_hitbox:
+            self.setCursor(Qt.PointingHandCursor)
+        else:
+            self.setCursor(Qt.ArrowCursor)
         
         # top view hover logic
         new_hovered = None
@@ -478,8 +583,9 @@ class TopViewCADWidget(QWidget):
             self.update()
 
     def paintEvent(self, event):
-        # clear hover zones at start of each paint
+        # clear hover zones and dimension hitboxes at start of each paint
         self.top_view_hover_zones = []
+        self.dimension_label_hitboxes = []
         
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -525,6 +631,8 @@ class TopViewCADWidget(QWidget):
 
         for i, line in enumerate(lines):
             painter.drawText(int(x), int(first_line_y + i * line_height), line)
+
+        return bg_rect
 
     
     def draw_dimension_arrow(self, painter, x1, y1, x2, y2, text, horizontal=True, offset=0, text_offset=0, draw_extensions=True, extension_direction='down', extension_end_y=None):
@@ -1280,10 +1388,11 @@ class TopViewCADWidget(QWidget):
             x1_brace = bracing_positions[0] + x_offset_last
             x2_brace = bracing_positions[1] + x_offset_last
             
-            self.draw_dimension_arrow_with_extensions_up(
+            rect_cb = self.draw_dimension_arrow_with_extensions_up(
                 painter, x1_brace, dim_y1, x2_brace, dim_y1,
                 label_cb, last_girder_y
             )
+            self.register_dimension_hitbox(rect_cb, KEY_MP_CB_SPACING, "Bracing Spacing", "m", cb_spacing_m, False)
             dim_y_next = dim_y_base + DIM_STACK_GAP
         else:
             dim_y_next = dim_y_base
@@ -1297,10 +1406,11 @@ class TopViewCADWidget(QWidget):
         if self.show_span_values:
             label_span += f" = {span_m:.1f} m"
         
-        self.draw_dimension_arrow_with_extensions_up(
+        rect_span = self.draw_dimension_arrow_with_extensions_up(
             painter, x1_span, dim_y2, x2_span, dim_y2,
             label_span, last_girder_y
         )
+        self.register_dimension_hitbox(rect_span, KEY_SPAN, "Span Length", "m", span_m, True)
 
         # GIRDER SPACING dimension (always visible)
         if n > 1:
@@ -1330,12 +1440,13 @@ class TopViewCADWidget(QWidget):
             if self.show_carriageway_values:
                 label_text += f"\n= {gs_m:.2f} m"
 
-            self.draw_text_with_background(
+            bg_rect_gs = self.draw_text_with_background(
                 painter, label_x, label_y,
                 label_text,
                 QColor(255, 255, 255, 240),
                 QColor(0, 0, 0), 9, False
             )
+            self.register_dimension_hitbox(bg_rect_gs, KEY_TS_GIRDER_SPACING, "Girder Spacing", "m", gs_m, True)
 
         # CL OF BEARING labels - ALWAYS VISIBLE (moved outside hover condition)
         label_y_bearing = top_extent - 8
@@ -1461,7 +1572,7 @@ class TopViewCADWidget(QWidget):
         metrics = painter.fontMetrics()
         text_width = metrics.boundingRect(text).width()
         
-        self.draw_text_with_background(painter, text_x - text_width/2, text_y, text, 
+        return self.draw_text_with_background(painter, text_x - text_width/2, text_y, text, 
                                     QColor(255, 255, 255, 240), QColor(0, 0, 0), 9, False)
 
 

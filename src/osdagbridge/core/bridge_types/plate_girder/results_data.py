@@ -94,6 +94,29 @@ def _build_nodes_members() -> tuple[dict, dict]:
     return nodes, members
 
 
+def get_transverse_member_tags(data: dict) -> list[int]:
+    """
+    Return all element tags corresponding to transverse members (end diaphragms and cross bracings).
+    Cleanly routes transverse member data extraction from results dataset/dictionary.
+    """
+    if "transverse_members" in data:
+        return [int(t) for t in data["transverse_members"]]
+    # Fallback to computing from members and nodes if raw dict provided
+    members = data.get("members", {})
+    nodes = data.get("nodes", {})
+    _z_tol = 1e-3
+    transverse = []
+    for tag, (n1, n2) in members.items():
+        n1_int = int(n1) if str(n1).isdigit() else n1
+        n2_int = int(n2) if str(n2).isdigit() else n2
+        c1 = nodes.get(n1) or nodes.get(str(n1)) or nodes.get(n1_int)
+        c2 = nodes.get(n2) or nodes.get(str(n2)) or nodes.get(n2_int)
+        if c1 and c2:
+            if abs(c1[2] - c2[2]) >= _z_tol or abs(c1[1] - c2[1]) >= _z_tol:
+                transverse.append(int(tag))
+    return transverse
+
+
 def dump_full_data(
     model,
     edge_dist: float = 0.0,

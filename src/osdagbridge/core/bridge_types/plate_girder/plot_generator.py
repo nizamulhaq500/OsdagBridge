@@ -159,6 +159,145 @@ def _build_polyline(elems, members, nodes, force_i, force_j, ds):
     return np.array(xs), np.array(ys), np.array(zs), np.array(vals), node_ids
 
 
+def _find_transverse_lines(nodes, members, tol=1e-3):
+    """
+    Find and group transverse members (end diaphragms and intermediate cross bracings)
+    into continuous transverse lines spanning across bridge girders.
+    Returns an OrderedDict: { line_name: [elem_tag, ...] }
+    """
+    trans_elems = {}
+    for ele, (n1, n2) in members.items():
+        if n1 not in nodes or n2 not in nodes:
+            continue
+        if abs(nodes[n1][2] - nodes[n2][2]) > tol:
+            if nodes[n1][2] > nodes[n2][2]:
+                trans_elems[ele] = (n2, n1)
+            else:
+                trans_elems[ele] = (n1, n2)
+
+    if not trans_elems:
+        return {}
+
+    node_to_elems = defaultdict(list)
+    for ele, (n1, n2) in trans_elems.items():
+        node_to_elems[n1].append(ele)
+        node_to_elems[n2].append(ele)
+
+    visited = set()
+    transverse_lines = []
+
+    for start_ele in trans_elems:
+        if start_ele in visited:
+            continue
+        component = []
+        queue = [start_ele]
+        visited.add(start_ele)
+        while queue:
+            curr = queue.pop(0)
+            component.append(curr)
+            n1, n2 = trans_elems[curr]
+            for adj_node in (n1, n2):
+                for next_ele in node_to_elems[adj_node]:
+                    if next_ele not in visited:
+                        visited.add(next_ele)
+                        queue.append(next_ele)
+
+        component.sort(key=lambda e: min(nodes[members[e][0]][2], nodes[members[e][1]][2]))
+        transverse_lines.append(component)
+
+    transverse_lines.sort(key=lambda line: float(np.mean([(nodes[members[e][0]][0] + nodes[members[e][1]][0]) / 2.0 for e in line])))
+
+    result = {}
+    n_lines = len(transverse_lines)
+    for idx, line in enumerate(transverse_lines, start=1):
+        if idx == 1:
+            name = "End Diaphragm 1"
+        elif idx == n_lines and n_lines > 1:
+            name = "End Diaphragm 2"
+        else:
+            name = f"Cross Bracing {idx - 1}" if n_lines > 2 else f"Transverse {idx}"
+        result[name] = line
+
+    return result
+
+
+def _build_transverse_polyline(elems, members, nodes, force_i, force_j, ds):
+    """
+    Build arrays (xs, ys, zs, vals, node_ids) for one transverse line.
+    """
+    def get_force(elem, comp):
+        try:
+            return float(ds["forces"].sel(Element=elem, Component=comp).values)
+        except Exception:
+            return 0.0
+
+    def find_component(name):
+        for c in ds["Component"].values:
+            if str(c).lower() == name.lower():
+                return c
+        return None
+
+    comp_i = find_component(force_i)
+    comp_j = find_component(force_j)
+
+    xs, ys, zs, vals, node_ids = [], [], [], [], []
+
+    for i, e in enumerate(elems):
+        n1, n2 = members[e]
+        flipped = False
+        if nodes[n1][2] > nodes[n2][2]:
+            n1, n2 = n2, n1
+            flipped = True
+
+        ci = comp_j if flipped else comp_i
+        cj = comp_i if flipped else comp_j
+
+        x1, y1, z1 = nodes[n1]
+        x2, y2, z2 = nodes[n2]
+
+        v1 = round(get_force(e, ci) / 1000.0, 3) if ci else 0.0
+        v2 = round(get_force(e, cj) / 1000.0, 3) if cj else 0.0
+
+        if i == 0 or (len(node_ids) > 0 and node_ids[-1] != n1):
+            xs.append(x1); ys.append(y1); zs.append(z1)
+            vals.append(v1)
+            node_ids.append(n1)
+
+        xs.append(x2); ys.append(y2); zs.append(z2)
+        vals.append(v2)
+        node_ids.append(n2)
+
+    return np.array(xs), np.array(ys), np.array(zs), np.array(vals), node_ids
+
+
+def _build_transverse_deflection_polyline(elems, members, nodes, disp_dict):
+    """
+    Build arrays (xs, ys, zs, vals, node_ids) for deflection along one transverse line.
+    """
+    xs, ys, zs, vals, node_ids = [], [], [], [], []
+    for i, e in enumerate(elems):
+        n1, n2 = members[e]
+        if nodes[n1][2] > nodes[n2][2]:
+            n1, n2 = n2, n1
+
+        x1, y1, z1 = nodes[n1]
+        x2, y2, z2 = nodes[n2]
+
+        v1 = disp_dict.get(int(n1), disp_dict.get(str(int(n1)), 0.0))
+        v2 = disp_dict.get(int(n2), disp_dict.get(str(int(n2)), 0.0))
+
+        if i == 0 or (len(node_ids) > 0 and node_ids[-1] != n1):
+            xs.append(x1); ys.append(y1); zs.append(z1)
+            vals.append(v1)
+            node_ids.append(n1)
+
+        xs.append(x2); ys.append(y2); zs.append(z2)
+        vals.append(v2)
+        node_ids.append(n2)
+
+    return np.array(xs), np.array(ys), np.array(zs), np.array(vals), node_ids
+
+
 # =============================================================================
 # DRAWING HELPERS (matplotlib 3-D)
 # =============================================================================
@@ -375,7 +514,7 @@ def _add_coordinate_triad(ax, nodes, scale=0.12, eng_scale: float = 1.0):
     ax.set_zlim(zlim)
     
 def _get_bg_nodes_members(nodes, members, edge_dist, selected_girder, girder_items):
-    if selected_girder == "All":
+    if selected_girder in ("All", "Transverse Members"):
         return nodes, members
     filtered_nodes = {}
     filtered_members = {}
@@ -402,7 +541,7 @@ def _add_supports(ax, nodes, members, edge_dist=0.0, selected_girder="All"):
         if not elems: continue
         
         girder_name = f"G{i}" if edge_dist > 0 else f"G{i + 1}"
-        if selected_girder != "All" and girder_name != selected_girder:
+        if selected_girder not in ("All", "Transverse Members") and girder_name != selected_girder:
             continue
 
         # Skip placing supports on edge beams if an overhang exists!
@@ -572,6 +711,18 @@ def build_figure_grillage(nodes, members, edge_dist=0.0, selected_girder="All"):
             ax.text(x_start - (x_range * 0.02), z_base, 0, f"{girder_name}",
                     color="black", fontsize=13, fontweight="normal",
                     ha="right", va="center", zorder=6, gid="girder_labels")
+
+    if selected_girder == "Transverse Members":
+        trans_lines = _find_transverse_lines(nodes, members)
+        for line_idx, (line_name, elems) in enumerate(trans_lines.items()):
+            for e in elems:
+                n1, n2 = members[e]
+                ax.plot([nodes[n1][0], nodes[n2][0]], [nodes[n1][2], nodes[n2][2]], [0, 0],
+                        color="#E65100", linewidth=2.5, zorder=5)
+            first_n = members[elems[0]][0]
+            short_name = "ED1" if "End Diaphragm 1" in line_name else ("ED2" if "End Diaphragm 2" in line_name else f"CB{line_name.replace('Cross Bracing', '').strip()}")
+            ax.text(nodes[first_n][0] - x_range * 0.02, nodes[first_n][2], 0, f"{short_name}",
+                    color="black", fontsize=11, fontweight="bold", ha="right", va="center", zorder=6, gid="girder_labels")
 
     # Extract node IDs and coordinates properly for tracking
     node_ids = list(bg_nodes.keys())
@@ -811,6 +962,73 @@ def build_figure_sfd(ds, force_key, nodes, members, edge_dist=0.0, eng_scale=1.0
                             color=standard_gray, fontsize=7, ha=h_align, va=v_align, zorder=6, 
                             gid="all_vals", bbox=dict(boxstyle="round,pad=0.1", facecolor="white", alpha=0.7, edgecolor="none"))
 
+    if selected_girder == "Transverse Members":
+        trans_lines = _find_transverse_lines(nodes, members)
+        all_trans_vals = []
+        for line_idx, (line_name, elems) in enumerate(trans_lines.items()):
+            xs, ys, zs, V, node_ids = _build_transverse_polyline(
+                elems, members, nodes, comp_i_name, comp_j_name, ds
+            )
+            if len(V) == 0:
+                continue
+            all_trans_vals.extend(V.tolist())
+            V = V.copy()
+            V[-1] = -V[-1]
+            V_geom = V * v_scale
+            if V_geom.size:
+                global_vmin = min(global_vmin, float(np.min(V_geom)))
+                global_vmax = max(global_vmax, float(np.max(V_geom)))
+
+            ax.plot(xs, zs, np.zeros_like(xs), color=base_color, linewidth=1.5, alpha=0.5, zorder=3)
+            ax.scatter(xs, zs, np.zeros_like(xs), color=base_color, s=5, zorder=4, depthshade=False, alpha=0.4)
+
+            short_name = "ED1" if "End Diaphragm 1" in line_name else ("ED2" if "End Diaphragm 2" in line_name else f"CB{line_name.replace('Cross Bracing', '').strip()}")
+            ax.text(xs[0] - x_range * 0.015, zs[0], 0, f"{short_name}",
+                    color="black", fontsize=10, fontweight="bold", ha="right", va="center",
+                    zorder=100 - line_idx, gid="girder_labels")
+
+            x_step = np.repeat(xs, 2)[1:-1]
+            V_step = np.repeat(V_geom[:-1], 2)
+            z_step = np.repeat(zs, 2)[1:-1]
+            y_step = V_step
+
+            ax.plot_surface(
+                np.vstack([x_step, x_step]),
+                np.vstack([z_step, z_step]),
+                np.vstack([np.zeros_like(y_step), y_step]),
+                color=fill_color, alpha=0.25, linewidth=0, antialiased=False, zorder=2
+            )
+            ax.plot(x_step, z_step, y_step, color=shear_color, linewidth=2.0, zorder=4)
+
+            for xi, zi, vi_geom in zip(xs, zs, V_geom):
+                ax.plot([xi, xi], [zi, zi], [0, vi_geom], color=shear_color, linewidth=1.2, alpha=0.7, zorder=3)
+
+            sc = ax.scatter(xs, zs, V_geom, color=shear_color, s=30, zorder=5, depthshade=False)
+            _scatter_objs.append(sc)
+            _scatter_data[id(sc)] = (node_ids, xs, V)
+
+            idx_max = int(np.argmax(V))
+            idx_min = int(np.argmin(V))
+            summary_data[line_name] = {"max": float(V[idx_max]), "min": float(V[idx_min])}
+
+            ax.plot([xs[idx_max]], [zs[idx_max]], [V_geom[idx_max]],
+                    marker="o", markersize=8, color="black", markeredgecolor="white", markeredgewidth=1.5,
+                    linestyle="None", zorder=10, gid="max_line")
+            ax.text(xs[idx_max], zs[idx_max], V_geom[idx_max], f" {V[idx_max]:.3f} kN",
+                    color="black", fontsize=7, fontweight="bold", ha="left", va="bottom",
+                    zorder=11, gid="max_line", bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8, edgecolor="none"))
+
+            ax.plot([xs[idx_min]], [zs[idx_min]], [V_geom[idx_min]],
+                    marker="o", markersize=8, color="black", markeredgecolor="white", markeredgewidth=1.5,
+                    linestyle="None", zorder=10, gid="min_line")
+            ax.text(xs[idx_min], zs[idx_min], V_geom[idx_min], f" {V[idx_min]:.3f} kN",
+                    color="black", fontsize=7, fontweight="bold", ha="right", va="top",
+                    zorder=11, gid="min_line", bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8, edgecolor="none"))
+
+        if all_trans_vals:
+            all_arr = np.array(all_trans_vals)
+            summary_data["Transverse Members"] = {"max": float(np.max(all_arr)), "min": float(np.min(all_arr))}
+
     # ==========================================
     # Hover Annotations (With Garbage-Collection Fix)
     # ==========================================
@@ -1043,6 +1261,64 @@ def build_figure_bmd(ds, force_key, nodes, members, edge_dist=0.0, eng_scale=1.0
         _scatter_data[id(sc)] = (node_ids[1:-1], xs[1:-1], Mz[1:-1])
 
         summary_data[girder_name] = {"max": float(max(Mz)), "min": float(min(Mz))}
+
+    if selected_girder == "Transverse Members":
+        trans_lines = _find_transverse_lines(nodes, members)
+        all_trans_vals = []
+        for line_idx, (line_name, elems) in enumerate(trans_lines.items()):
+            xs, ys, zs, Mz, node_ids = _build_transverse_polyline(
+                elems, members, nodes, comp_i_name, comp_j_name, ds
+            )
+            if len(Mz) == 0:
+                continue
+            all_trans_vals.extend(Mz.tolist())
+            y_plot = -Mz * v_scale
+            if y_plot.size:
+                global_vmin = min(global_vmin, float(np.min(y_plot)))
+                global_vmax = max(global_vmax, float(np.max(y_plot)))
+
+            ax.plot(xs, zs, np.zeros_like(xs), color=base_color, linewidth=1.5, alpha=0.5, zorder=3)
+            ax.scatter(xs, zs, np.zeros_like(xs), color=base_color, s=5, zorder=4, depthshade=False, alpha=0.4)
+
+            short_name = "ED1" if "End Diaphragm 1" in line_name else ("ED2" if "End Diaphragm 2" in line_name else f"CB{line_name.replace('Cross Bracing', '').strip()}")
+            ax.text(xs[0] - x_range * 0.015, zs[0], 0, f"{short_name}",
+                    color="black", fontsize=10, fontweight="bold", ha="right", va="center",
+                    zorder=100 - line_idx, gid="girder_labels")
+
+            ax.plot_surface(
+                np.vstack([xs, xs]),
+                np.vstack([zs, zs]),
+                np.vstack([np.zeros_like(y_plot), y_plot]),
+                color=fill_color, alpha=0.25, linewidth=0, antialiased=False, zorder=2
+            )
+            ax.plot(xs, zs, y_plot, color=moment_color, linewidth=2.0, zorder=4)
+
+            idx_max = int(np.argmax(Mz))
+            ax.plot([xs[idx_max], xs[idx_max]], [zs[idx_max], zs[idx_max]], [0, y_plot[idx_max]],
+                    color="#FF4136", linewidth=1.5, linestyle="--", zorder=3, gid="max_line")
+            ax.text(xs[idx_max], zs[idx_max], y_plot[idx_max],
+                    f" {Mz[idx_max]:.2f} kNm", color="#333333", fontsize=8, fontweight="bold", zorder=6, gid="max_line",
+                    bbox=dict(facecolor='white', edgecolor='none', alpha=0.85, pad=1.0))
+
+            idx_min = int(np.argmin(Mz))
+            ax.plot([xs[idx_min], xs[idx_min]], [zs[idx_min], zs[idx_min]], [0, y_plot[idx_min]],
+                    color="#0074D9", linewidth=1.5, linestyle="--", zorder=3, gid="min_line")
+            ax.text(xs[idx_min], zs[idx_min], y_plot[idx_min],
+                    f" {Mz[idx_min]:.2f} kNm", color="#333333", fontsize=8, fontweight="bold", zorder=6, gid="min_line",
+                    bbox=dict(facecolor='white', edgecolor='none', alpha=0.85, pad=1.0))
+
+            for xi, zi, yi, mzi in zip(xs, zs, y_plot, Mz):
+                ax.text(xi, zi, yi, f" {mzi:.2f} kNm", color="#555555", fontsize=7, zorder=5, gid="all_vals")
+
+            sc = ax.scatter(xs, zs, y_plot, color=moment_color, s=30, zorder=5, depthshade=False)
+            _scatter_objs.append(sc)
+            _scatter_data[id(sc)] = (node_ids, xs, Mz)
+
+            summary_data[line_name] = {"max": float(max(Mz)), "min": float(min(Mz))}
+
+        if all_trans_vals:
+            all_arr = np.array(all_trans_vals)
+            summary_data["Transverse Members"] = {"max": float(np.max(all_arr)), "min": float(np.min(all_arr))}
 
     if _MPLCURSORS and _scatter_objs:
         cursor = mplcursors.cursor(_scatter_objs, hover=True)
@@ -1465,8 +1741,73 @@ def build_figure_deflection(ds, disp_key, nodes, members, edge_dist=0.0, eng_sca
                     color=defl_color, linewidth=1.5, linestyle="--", zorder=3, gid="min_line")
             ax.text(xs[idx_min], z_base, y_plot[idx_min],
                     f" {vals[idx_min]:.3f} mm", color="#4A4A4A", fontsize=7, fontweight="bold", zorder=6, gid="min_line")
-        
-        
+
+    if selected_girder == "Transverse Members":
+        trans_lines = _find_transverse_lines(nodes, members)
+        all_trans_vals = []
+        for line_idx, (line_name, elems) in enumerate(trans_lines.items()):
+            xs, ys, zs, vals, node_ids = _build_transverse_deflection_polyline(
+                elems, members, nodes, disp_dict
+            )
+            if len(vals) == 0:
+                continue
+            all_trans_vals.extend(vals.tolist())
+            y_plot = vals * v_scale
+            if y_plot.size:
+                global_vmin = min(global_vmin, float(np.min(y_plot)))
+                global_vmax = max(global_vmax, float(np.max(y_plot)))
+
+            ax.plot(xs, zs, np.zeros_like(xs), color=base_color, linewidth=1.5, alpha=0.5, zorder=3)
+            ax.scatter(xs, zs, np.zeros_like(xs), color=base_color, s=5, zorder=4, depthshade=False, alpha=0.4)
+
+            short_name = "ED1" if "End Diaphragm 1" in line_name else ("ED2" if "End Diaphragm 2" in line_name else f"CB{line_name.replace('Cross Bracing', '').strip()}")
+            ax.text(xs[0] - x_range * 0.015, zs[0], 0, f"{short_name}",
+                    color="black", fontsize=10, fontweight="bold", ha="right", va="center",
+                    zorder=100 - line_idx, gid="girder_labels")
+
+            ax.plot(xs, zs, y_plot, color=defl_color, linewidth=2.5, zorder=4)
+
+            sc = ax.scatter(xs, zs, y_plot, color="black", s=30, zorder=5, depthshade=False)
+            _scatter_objs.append(sc)
+            _scatter_data[id(sc)] = (node_ids, xs, vals)
+
+            idx_max = int(np.argmin(vals))
+            idx_min = int(np.argmax(vals))
+
+            for j in range(len(xs)):
+                if abs(vals[j]) > 1e-4:
+                    if j == idx_max or j == idx_min:
+                        continue
+                    v_align = "bottom" if j % 2 == 0 else "top"
+                    h_align = "left" if line_idx % 2 == 0 else "right"
+                    ax.text(xs[j], zs[j], y_plot[j],
+                            f" {vals[j]:.3f} mm",
+                            color="#455A64",
+                            fontsize=7,
+                            ha=h_align,
+                            va=v_align,
+                            zorder=6,
+                            gid="all_vals",
+                            bbox=dict(boxstyle="round,pad=0.1", facecolor="white", alpha=0.7, edgecolor="none"))
+
+            ax.plot([xs[idx_max], xs[idx_max]], [zs[idx_max], zs[idx_max]], [0, y_plot[idx_max]],
+                    color=defl_color, linewidth=1.5, linestyle="--", zorder=3, gid="max_line")
+            ax.text(xs[idx_max], zs[idx_max], y_plot[idx_max],
+                    f" {vals[idx_max]:.3f} mm", color="#4A4A4A", fontsize=7, fontweight="bold", zorder=6, gid="max_line")
+
+            ax.plot([xs[idx_min], xs[idx_min]], [zs[idx_min], zs[idx_min]], [0, y_plot[idx_min]],
+                    color=defl_color, linewidth=1.5, linestyle="--", zorder=3, gid="min_line")
+            ax.text(xs[idx_min], zs[idx_min], y_plot[idx_min],
+                    f" {vals[idx_min]:.3f} mm", color="#4A4A4A", fontsize=7, fontweight="bold", zorder=6, gid="min_line")
+
+            summary_data[line_name] = {
+                "max": float(np.max(vals)),
+                "min": float(np.min(vals))
+            }
+
+        if all_trans_vals:
+            all_arr = np.array(all_trans_vals)
+            summary_data["Transverse Members"] = {"max": float(np.max(all_arr)), "min": float(np.min(all_arr))}
 
     # =========================================================
     # PHASE 3: FINISHING TOUCHES (Hover, Supports, Axes)

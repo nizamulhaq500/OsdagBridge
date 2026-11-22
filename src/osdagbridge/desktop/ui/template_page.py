@@ -347,6 +347,7 @@ class CustomWindow(QWidget):
 
         # CAD widget
         self.cad_comp_widget = BridgeDualCADWidget(self)
+        self.cad_comp_widget.cad_parameter_edited.connect(self._on_cad_parameter_edited)
         self.cad_comp_widget.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Expanding
         )
@@ -900,6 +901,82 @@ class CustomWindow(QWidget):
                 pass
 
         # Apply state to CAD UI & Update Cad-State
+        self.cad_comp_widget.update_from_osdag_inputs(self.input_dict)
+
+    def _on_cad_parameter_edited(self, key: str, value: float):
+        """
+        Handle parameter edits originating from 2D CAD canvas double-clicks.
+        Syncs the new parameter value into the input model, input dock, and additional inputs dialog,
+        re-derives dependent layout metrics, and triggers a dynamic redraw of the CAD canvas.
+        """
+        # 1. Update working input dictionary
+        self.input_dict[key] = value
+
+        # 2. Update InputDock widget if present (e.g. KEY_SPAN, KEY_CARRIAGEWAY_WIDTH)
+        if self.input_dock and self.input_dock.input_widget:
+            w = self.input_dock.input_widget.findChild(QLineEdit, key)
+            if w is not None:
+                w.blockSignals(True)
+                w.setText(str(value))
+                w.blockSignals(False)
+                self.input_dock.is_require_field_changed = True
+
+        # 3. Update Additional Inputs Dialog if instantiated (e.g. KEY_TS_GIRDER_SPACING, KEY_TS_DECK_THICKNESS)
+        if self._additional_inputs_dialog is not None:
+            self._additional_inputs_dialog.working_input_dict[key] = value
+            w = self._additional_inputs_dialog.findChild(QLineEdit, key)
+            if w is not None:
+                w.blockSignals(True)
+                w.setText(str(value))
+                w.blockSignals(False)
+                self._additional_inputs_dialog.is_modified = True
+
+        # 4. Handle girder layout recalculation if girder spacing was modified
+        if key == KEY_TS_GIRDER_SPACING:
+            try:
+                from osdagbridge.core.bridge_types.plate_girder.initial_sizing import BridgeConfigurationSolver
+                n_girders = int(self.input_dict.get(KEY_TS_NO_OF_GIRDERS, 4))
+                cw = float(self.input_dict.get(KEY_CARRIAGEWAY_WIDTH, 10.5))
+                cb_w = float(self.input_dict.get(KEY_CB_WIDTH, 0.5))
+                fp_w = float(self.input_dict.get(KEY_TS_FOOTPATH_WIDTH, 0.0) or 0.0)
+                rl_w = float(self.input_dict.get(KEY_RL_WIDTH, 0.0) or 0.0)
+                md_w = float(self.input_dict.get(KEY_MD_WIDTH, 0.0) or 0.0)
+                n_fp = int(self.input_dict.get(KEY_TS_NO_OF_FOOTPATHS, 0))
+                solver = BridgeConfigurationSolver(
+                    carriageway_width=cw,
+                    crash_barrier_width=cb_w,
+                    footpath_width=fp_w,
+                    railing_width=rl_w,
+                    median_width=md_w,
+                    n_footpaths=n_fp,
+                )
+                layout_res = solver._solve_layout(no_of_girders=n_girders, girder_spacing=value, changed_field="spacing")
+                self.input_dict[KEY_TS_GIRDER_SPACING] = layout_res.girder_spacing
+                self.input_dict[KEY_TS_DECK_OVERHANG] = layout_res.deck_overhang
+                self.input_dict[KEY_TS_OVERALL_WIDTH] = layout_res.overall_width
+                if self._additional_inputs_dialog is not None:
+                    self._additional_inputs_dialog.working_input_dict[KEY_TS_GIRDER_SPACING] = layout_res.girder_spacing
+                    self._additional_inputs_dialog.working_input_dict[KEY_TS_DECK_OVERHANG] = layout_res.deck_overhang
+                    self._additional_inputs_dialog.working_input_dict[KEY_TS_OVERALL_WIDTH] = layout_res.overall_width
+                    w_oh = self._additional_inputs_dialog.findChild(QLineEdit, KEY_TS_DECK_OVERHANG)
+                    if w_oh:
+                        w_oh.blockSignals(True)
+                        w_oh.setText(f"{layout_res.deck_overhang:.2f}")
+                        w_oh.blockSignals(False)
+            except Exception as e:
+                print("Error recalculating layout from girder spacing edit:", e)
+        elif key in (KEY_CARRIAGEWAY_WIDTH, KEY_SPAN):
+            try:
+                solve_extend_basic_input_dict(self.input_dict)
+                if self._additional_inputs_dialog is not None:
+                    self._additional_inputs_dialog.set_input_dictionary(self.input_dict)
+            except Exception:
+                pass
+
+        # 5. Enable value display on CAD widgets and trigger CAD redraw
+        self.cad_comp_widget.cross_section_widget.show_carriageway_values = True
+        self.cad_comp_widget.top_view_widget.show_span_values = True
+        self.cad_comp_widget.top_view_widget.show_carriageway_values = True
         self.cad_comp_widget.update_from_osdag_inputs(self.input_dict)
 
     #---------------------------------Docking-Icons-Functionality-START----------------------------------------------
